@@ -231,12 +231,27 @@ class CodexBridge:
             relay_url=args.relay_url,
             bridge_label=args.bridge_label,
         )
+        self._apply_cli_overrides()
         self._stopping = asyncio.Event()
         self._process: asyncio.subprocess.Process | None = None
         self._local_token_file: tempfile.NamedTemporaryFile | None = None
         self._download_offers: dict[str, BridgeDownloadOffer] = {}
         self._download_tasks: set[asyncio.Task[None]] = set()
         self._download_cancellations: dict[str, asyncio.Event] = {}
+
+    def _apply_cli_overrides(self) -> None:
+        needs_save = False
+        if self._config.relay_url != self._args.relay_url:
+            self._config.relay_url = self._args.relay_url.rstrip("/")
+            self._config.device_id = None
+            self._config.pairing_code = None
+            needs_save = True
+        if self._config.bridge_label != self._args.bridge_label:
+            self._config.bridge_label = self._args.bridge_label
+            self._config.pairing_code = None
+            needs_save = True
+        if needs_save:
+            self._config.save(self._config_path)
 
     async def run(self) -> None:
         await self._ensure_enrolled()
@@ -287,15 +302,40 @@ class CodexBridge:
             loop.add_signal_handler(sig, self._stopping.set)
         backoff = 1.0
         while not self._stopping.is_set():
+            session_task = asyncio.create_task(self._run_single_session())
+            stop_task = asyncio.create_task(self._stopping.wait())
             try:
-                await self._run_single_session()
+                done, pending = await asyncio.wait(
+                    {session_task, stop_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if stop_task in done:
+                    session_task.cancel()
+                    try:
+                        await session_task
+                    except asyncio.CancelledError:
+                        pass
+                    break
+                await session_task
                 backoff = 1.0
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 print(f"Bridge session failed: {exc}", file=sys.stderr)
-                await asyncio.sleep(backoff)
+                try:
+                    await asyncio.wait_for(self._stopping.wait(), timeout=backoff)
+                except asyncio.TimeoutError:
+                    pass
                 backoff = min(backoff * 2.0, 15.0)
+            finally:
+                for task in (session_task, stop_task):
+                    if not task.done():
+                        task.cancel()
+                for task in (session_task, stop_task):
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
         await self._shutdown_local_process()
 
     async def _run_single_session(self) -> None:

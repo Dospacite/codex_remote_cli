@@ -284,6 +284,56 @@ class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bridge._config.device_id, "device-2")
             self.assertEqual(bridge._config.pairing_code, fresh_pairing_code)
 
+    async def test_refresh_pairing_code_requests_new_code_for_existing_device(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "config.json"
+            config = BridgeConfig.create(
+                relay_url="https://cr.rousoftware.com",
+                bridge_label="workstation",
+            )
+            config.device_id = "device-1"
+            config.pairing_code = BridgeConfigTests._pairing_code_with_expiry(
+                relay_url="https://cr.rousoftware.com",
+                expires_at=2234567890,
+            )
+            config.save(path)
+
+            bridge = CodexBridge(
+                Namespace(
+                    config=str(path),
+                    relay_url="https://cr.rousoftware.com",
+                    bridge_label="workstation",
+                    enroll_token=None,
+                    local_port=47123,
+                    ready_timeout=30,
+                    app_server_bin="codex app-server",
+                    app_server_cwd=None,
+                    command="serve",
+                )
+            )
+
+            fresh_pairing_code = BridgeConfigTests._pairing_code_with_expiry(
+                relay_url="https://cr.rousoftware.com",
+                expires_at=2234567890,
+            )
+            response = mock.AsyncMock()
+            response.status = 200
+            response.text = mock.AsyncMock(
+                return_value=json.dumps({"deviceId": "device-1", "pairingCode": fresh_pairing_code})
+            )
+            post_context = mock.AsyncMock()
+            post_context.__aenter__.return_value = response
+            post = mock.Mock(return_value=post_context)
+            session_context = mock.AsyncMock()
+            session_context.__aenter__.return_value = mock.Mock(post=post)
+
+            with mock.patch("aiohttp.ClientSession", return_value=session_context):
+                await bridge._refresh_pairing_code()
+
+            post.assert_called_once()
+            self.assertEqual(bridge._config.device_id, "device-1")
+            self.assertEqual(bridge._config.pairing_code, fresh_pairing_code)
+
     async def test_ensure_enrolled_normalizes_pairing_code_relay_url(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             path = Path(tempdir) / "config.json"

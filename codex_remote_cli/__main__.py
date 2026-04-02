@@ -130,6 +130,26 @@ def auth_payload(
     )
 
 
+def pairing_refresh_payload(
+    *,
+    device_id: str,
+    bridge_label: str,
+    bridge_signing_public_key: str,
+    request_nonce: str,
+    request_timestamp: int,
+) -> bytes:
+    return canonical_json(
+        {
+            "bridgeLabel": bridge_label,
+            "bridgeSigningPublicKey": bridge_signing_public_key,
+            "deviceId": device_id,
+            "requestNonce": request_nonce,
+            "requestTimestamp": request_timestamp,
+            "type": "codex-remote-pairing-refresh-v1",
+        }
+    )
+
+
 def derive_session_key(
     *,
     device_id: str,
@@ -309,7 +329,9 @@ class CodexBridge:
             self._config.save(self._config_path)
 
     async def run(self) -> None:
-        await self._ensure_enrolled()
+        enrolled_now = await self._ensure_enrolled()
+        if not enrolled_now:
+            await self._refresh_pairing_code()
         if self._args.command == "pairing-code":
             if not self._config.pairing_code:
                 print("No pairing code is available. Re-run `serve` with a fresh config.", file=sys.stderr)
@@ -328,9 +350,9 @@ class CodexBridge:
         print(render_pairing_qr(self._config.pairing_code))
         print("")
 
-    async def _ensure_enrolled(self) -> None:
+    async def _ensure_enrolled(self) -> bool:
         if self._config.device_id:
-            return
+            return False
         headers = {}
         if self._args.enroll_token:
             headers["X-Relay-Enroll-Token"] = self._args.enroll_token
@@ -348,6 +370,45 @@ class CodexBridge:
                     raise RuntimeError(f"Bridge enrollment failed: {response.status} {body}")
                 payload = json.loads(body)
         self._config.device_id = payload["deviceId"]
+        self._config.pairing_code = normalize_pairing_code_relay_url(
+            payload["pairingCode"],
+            self._config.relay_url,
+        )
+        self._config.save(self._config_path)
+        return True
+
+    async def _refresh_pairing_code(self) -> None:
+        if not self._config.device_id:
+            return
+        request_nonce = generate_token(12)
+        request_timestamp = utc_now()
+        request_signature = b64url_encode(
+            self._config.bridge_private_key.sign(
+                pairing_refresh_payload(
+                    device_id=self._config.device_id,
+                    bridge_label=self._config.bridge_label,
+                    bridge_signing_public_key=self._config.bridge_signing_public_key,
+                    request_nonce=request_nonce,
+                    request_timestamp=request_timestamp,
+                )
+            )
+        )
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self._config.relay_url}/api/v1/bridge/pairing-code",
+                json={
+                    "deviceId": self._config.device_id,
+                    "bridgeLabel": self._config.bridge_label,
+                    "bridgeSigningPublicKey": self._config.bridge_signing_public_key,
+                    "requestNonce": request_nonce,
+                    "requestTimestamp": request_timestamp,
+                    "requestSignature": request_signature,
+                },
+            ) as response:
+                body = await response.text()
+                if response.status >= 400:
+                    raise RuntimeError(f"Pairing code refresh failed: {response.status} {body}")
+                payload = json.loads(body)
         self._config.pairing_code = normalize_pairing_code_relay_url(
             payload["pairingCode"],
             self._config.relay_url,

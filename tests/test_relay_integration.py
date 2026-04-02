@@ -511,17 +511,30 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
         script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)
 
     async def _start_relay_server(self) -> None:
-        server_python = (
-            Path(__file__).resolve().parents[2]
-            / "codex_remote_server"
-            / ".venv"
-            / "bin"
-            / "python"
-        )
+        server_repo = Path(__file__).resolve().parents[2] / "codex_remote_server"
+        env = os.environ.copy()
+        server_python = os.getenv("CODEX_REMOTE_SERVER_PYTHON")
+
+        if server_python:
+            server_command = [server_python, "-m", "codex_remote_server"]
+        else:
+            venv_python = server_repo / ".venv" / "bin" / "python"
+            if venv_python.is_file():
+                server_command = [str(venv_python), "-m", "codex_remote_server"]
+            elif (server_repo / "codex_remote_server" / "__main__.py").is_file():
+                pythonpath_parts = [str(server_repo)]
+                existing_pythonpath = env.get("PYTHONPATH")
+                if existing_pythonpath:
+                    pythonpath_parts.append(existing_pythonpath)
+                env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+                server_command = [sys.executable, "-m", "codex_remote_server"]
+            else:
+                raise unittest.SkipTest(
+                    "codex_remote_server checkout not available; skipping relay integration test."
+                )
+
         self._server_process = await asyncio.create_subprocess_exec(
-            str(server_python),
-            "-m",
-            "codex_remote_server",
+            *server_command,
             "--host",
             "127.0.0.1",
             "--port",
@@ -532,6 +545,7 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
             str(self.temp_path / "relay.sqlite3"),
             "--enroll-token",
             "integration-token",
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -554,6 +568,8 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "Integration Bridge",
             "--local-port",
             str(self._app_server_port),
+            "--app-server-bin",
+            "app-server",
             "serve",
             env=env,
             cwd=str(Path(__file__).resolve().parents[1]),

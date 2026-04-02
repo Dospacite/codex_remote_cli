@@ -5,7 +5,9 @@ import asyncio
 import base64
 import json
 import os
+import shlex
 import signal
+import shutil
 import sys
 import tempfile
 import time
@@ -46,6 +48,44 @@ def utc_now() -> int:
 
 def generate_token(length: int = 32) -> str:
     return b64url_encode(os.urandom(length))
+
+
+def resolve_app_server_command(
+    command: str,
+    *,
+    cwd: str | None = None,
+) -> list[str]:
+    parts = shlex.split(command)
+    if not parts:
+        raise ValueError("App-server command must not be empty.")
+
+    executable = parts[0]
+    candidate = Path(executable).expanduser()
+    if candidate.is_absolute():
+        if candidate.is_file():
+            return [str(candidate), *parts[1:]]
+        raise FileNotFoundError(f"Configured app-server binary does not exist: {candidate}")
+
+    if candidate.parent != Path("."):
+        resolved = candidate.resolve()
+        if resolved.is_file():
+            return [str(resolved), *parts[1:]]
+        raise FileNotFoundError(f"Configured app-server binary does not exist: {resolved}")
+
+    on_path = shutil.which(executable)
+    if on_path:
+        return [on_path, *parts[1:]]
+
+    if cwd:
+        cwd_candidate = Path(cwd).expanduser() / executable
+        if cwd_candidate.is_file():
+            return [str(cwd_candidate.resolve()), *parts[1:]]
+
+    searched_cwd = f" or in --app-server-cwd ({cwd})" if cwd else ""
+    raise FileNotFoundError(
+        f"Unable to find app-server executable '{executable}' on PATH{searched_cwd}. "
+        "Set --app-server-bin or CODEX_REMOTE_APP_SERVER_BIN to the correct path."
+    )
 
 
 def session_bundle_payload(
@@ -280,8 +320,12 @@ class CodexBridge:
         token_file.write(token + "\n")
         token_file.flush()
         self._local_token_file = token_file
+        app_server_command = resolve_app_server_command(
+            self._args.app_server_bin,
+            cwd=self._args.app_server_cwd,
+        )
         command = [
-            "app-server",
+            *app_server_command,
             "--listen",
             f"ws://127.0.0.1:{self._args.local_port}",
             "--ws-auth",
@@ -829,11 +873,12 @@ class CodexBridge:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Codex Remote bridge CLI")
     parser.add_argument("--config", default="~/.config/codex_remote_cli/config.json")
-    parser.add_argument("--relay-url", default=os.getenv("CODEX_REMOTE_RELAY_URL", "https://relay.example.com"))
+    parser.add_argument("--relay-url", default=os.getenv("CODEX_REMOTE_RELAY_URL", "https://cr.rousoftware.com"))
     parser.add_argument("--bridge-label", default=os.getenv("CODEX_REMOTE_BRIDGE_LABEL", "My workstation"))
     parser.add_argument("--enroll-token", default=os.getenv("CODEX_REMOTE_ENROLL_TOKEN"))
     parser.add_argument("--local-port", type=int, default=int(os.getenv("CODEX_REMOTE_LOCAL_PORT", "47123")))
     parser.add_argument("--ready-timeout", type=int, default=int(os.getenv("CODEX_REMOTE_READY_TIMEOUT", "30")))
+    parser.add_argument("--app-server-bin", default=os.getenv("CODEX_REMOTE_APP_SERVER_BIN", "codex app-server"))
     parser.add_argument("--app-server-cwd", default=os.getenv("CODEX_REMOTE_APP_SERVER_CWD"))
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = False

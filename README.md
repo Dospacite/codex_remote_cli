@@ -75,11 +75,12 @@ This only works if the config already contains a pairing code from a previous su
 CLI flags:
 
 - `--config`: config file path, default `~/.config/codex_remote_cli/config.json`
-- `--relay-url`: relay base URL, default `https://relay.example.com`
+- `--relay-url`: relay base URL, default `https://cr.rousoftware.com`
 - `--bridge-label`: human-readable bridge name, default `My workstation`
 - `--enroll-token`: optional bootstrap token required by the relay when enrollment protection is enabled
 - `--local-port`: local `app-server` port, default `47123`
 - `--ready-timeout`: seconds to wait for `app-server` readiness, default `30`
+- `--app-server-bin`: `app-server` executable path or name, default `codex app-server`
 - `--app-server-cwd`: working directory for the spawned `app-server`
 
 Environment variables:
@@ -89,6 +90,7 @@ Environment variables:
 - `CODEX_REMOTE_ENROLL_TOKEN`
 - `CODEX_REMOTE_LOCAL_PORT`
 - `CODEX_REMOTE_READY_TIMEOUT`
+- `CODEX_REMOTE_APP_SERVER_BIN`
 - `CODEX_REMOTE_APP_SERVER_CWD`
 
 ## Local files

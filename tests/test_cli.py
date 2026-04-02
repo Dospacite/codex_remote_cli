@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 import stat
 import tempfile
@@ -14,6 +16,9 @@ from codex_remote_cli.__main__ import (
     CodexBridge,
     _validate_relay_url,
     build_parser,
+    canonical_json,
+    normalize_pairing_code_relay_url,
+    pairing_code_is_expired,
     resolve_app_server_command,
     render_pairing_qr,
 )
@@ -32,6 +37,27 @@ class RelayUrlValidationTests(unittest.TestCase):
 
 
 class BridgeConfigTests(unittest.TestCase):
+    @staticmethod
+    def _pairing_code(*, relay_url: str) -> str:
+        return BridgeConfigTests._pairing_code_with_expiry(
+            relay_url=relay_url,
+            expires_at=2234567890,
+        )
+
+    @staticmethod
+    def _pairing_code_with_expiry(*, relay_url: str, expires_at: int) -> str:
+        payload = {
+            "bridgeLabel": "workstation",
+            "bridgeSigningPublicKey": "bridge-key",
+            "claimToken": "claim-token",
+            "deviceId": "device-1",
+            "expiresAt": expires_at,
+            "relayUrl": relay_url,
+            "type": "codex-remote-pairing-v1",
+        }
+        encoded = base64.urlsafe_b64encode(canonical_json(payload)).rstrip(b"=").decode("ascii")
+        return f"crp1.{encoded}"
+
     def test_save_restricts_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             path = Path(tempdir) / "config.json"
@@ -102,12 +128,59 @@ class BridgeConfigTests(unittest.TestCase):
             self.assertEqual(bridge._config.device_id, "device-1")
             self.assertIsNone(bridge._config.pairing_code)
 
+    def test_loading_config_normalizes_pairing_code_relay_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "config.json"
+            config = BridgeConfig.create(
+                relay_url="https://new.example.com",
+                bridge_label="workstation",
+            )
+            config.device_id = "device-1"
+            config.pairing_code = self._pairing_code(relay_url="https://relay.example.com")
+            config.save(path)
+
+            bridge = CodexBridge(
+                Namespace(
+                    config=str(path),
+                    relay_url="https://new.example.com",
+                    bridge_label="workstation",
+                    enroll_token=None,
+                    local_port=47123,
+                    ready_timeout=30,
+                    app_server_bin="codex app-server",
+                    app_server_cwd=None,
+                    command="serve",
+                )
+            )
+
+            payload = json.loads(
+                base64.urlsafe_b64decode(bridge._config.pairing_code.split(".", 1)[1] + "==")
+            )
+            self.assertEqual(payload["relayUrl"], "https://new.example.com")
+
 
 class PairingQrTests(unittest.TestCase):
     def test_render_pairing_qr_returns_ascii_content(self) -> None:
         rendered = render_pairing_qr("crp1.example")
         self.assertTrue(rendered)
         self.assertIn("\n", rendered)
+
+    def test_normalize_pairing_code_relay_url_rewrites_embedded_host(self) -> None:
+        pairing_code = BridgeConfigTests._pairing_code(relay_url="https://relay.example.com")
+
+        normalized = normalize_pairing_code_relay_url(pairing_code, "https://cr.rousoftware.com")
+
+        payload = json.loads(base64.urlsafe_b64decode(normalized.split(".", 1)[1] + "=="))
+        self.assertEqual(payload["relayUrl"], "https://cr.rousoftware.com")
+
+    def test_pairing_code_is_expired_uses_embedded_timestamp(self) -> None:
+        pairing_code = BridgeConfigTests._pairing_code_with_expiry(
+            relay_url="https://relay.example.com",
+            expires_at=1234567890,
+        )
+
+        self.assertTrue(pairing_code_is_expired(pairing_code, now=1234567891))
+        self.assertFalse(pairing_code_is_expired(pairing_code, now=1234567889))
 
 
 class AppServerResolutionTests(unittest.TestCase):
@@ -157,6 +230,98 @@ class ParserTests(unittest.TestCase):
 
 
 class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ensure_enrolled_requests_fresh_pairing_code_when_cached_code_is_expired(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "config.json"
+            config = BridgeConfig.create(
+                relay_url="https://cr.rousoftware.com",
+                bridge_label="workstation",
+            )
+            config.device_id = "device-1"
+            config.pairing_code = BridgeConfigTests._pairing_code_with_expiry(
+                relay_url="https://cr.rousoftware.com",
+                expires_at=1234567890,
+            )
+            config.save(path)
+
+            with mock.patch("codex_remote_cli.__main__.time.time", return_value=1234567891):
+                bridge = CodexBridge(
+                    Namespace(
+                        config=str(path),
+                        relay_url="https://cr.rousoftware.com",
+                        bridge_label="workstation",
+                        enroll_token=None,
+                        local_port=47123,
+                        ready_timeout=30,
+                        app_server_bin="codex app-server",
+                        app_server_cwd=None,
+                        command="serve",
+                    )
+                )
+
+            self.assertIsNone(bridge._config.device_id)
+            self.assertIsNone(bridge._config.pairing_code)
+
+            fresh_pairing_code = BridgeConfigTests._pairing_code_with_expiry(
+                relay_url="https://cr.rousoftware.com",
+                expires_at=2234567890,
+            )
+            response = mock.AsyncMock()
+            response.status = 200
+            response.text = mock.AsyncMock(
+                return_value=json.dumps({"deviceId": "device-2", "pairingCode": fresh_pairing_code})
+            )
+            post_context = mock.AsyncMock()
+            post_context.__aenter__.return_value = response
+            post = mock.Mock(return_value=post_context)
+            session_context = mock.AsyncMock()
+            session_context.__aenter__.return_value = mock.Mock(post=post)
+
+            with mock.patch("aiohttp.ClientSession", return_value=session_context):
+                await bridge._ensure_enrolled()
+
+            post.assert_called_once()
+            self.assertEqual(bridge._config.device_id, "device-2")
+            self.assertEqual(bridge._config.pairing_code, fresh_pairing_code)
+
+    async def test_ensure_enrolled_normalizes_pairing_code_relay_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "config.json"
+
+            bridge = CodexBridge(
+                Namespace(
+                    config=str(path),
+                    relay_url="https://cr.rousoftware.com",
+                    bridge_label="workstation",
+                    enroll_token=None,
+                    local_port=47123,
+                    ready_timeout=30,
+                    app_server_bin="codex app-server",
+                    app_server_cwd=None,
+                    command="serve",
+                )
+            )
+
+            pairing_code = BridgeConfigTests._pairing_code(relay_url="https://relay.example.com")
+
+            response = mock.AsyncMock()
+            response.status = 200
+            response.text = mock.AsyncMock(
+                return_value=json.dumps({"deviceId": "device-1", "pairingCode": pairing_code})
+            )
+            post_context = mock.AsyncMock()
+            post_context.__aenter__.return_value = response
+            session_context = mock.AsyncMock()
+            session_context.__aenter__.return_value = mock.Mock(post=mock.Mock(return_value=post_context))
+
+            with mock.patch("aiohttp.ClientSession", return_value=session_context):
+                await bridge._ensure_enrolled()
+
+            payload = json.loads(
+                base64.urlsafe_b64decode(bridge._config.pairing_code.split(".", 1)[1] + "==")
+            )
+            self.assertEqual(payload["relayUrl"], "https://cr.rousoftware.com")
+
     async def test_serve_forever_stops_when_stop_event_is_set(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             path = Path(tempdir) / "config.json"

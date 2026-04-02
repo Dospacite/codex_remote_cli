@@ -155,6 +155,49 @@ def nonce_for(prefix: bytes, counter: int) -> bytes:
     return prefix + counter.to_bytes(8, "big")
 
 
+def normalize_pairing_code_relay_url(pairing_code: str, relay_url: str) -> str:
+    prefix = "crp1."
+    if not pairing_code.startswith(prefix):
+        return pairing_code
+    try:
+        payload = json.loads(b64url_decode(pairing_code[len(prefix) :]))
+    except (ValueError, json.JSONDecodeError):
+        return pairing_code
+    if payload.get("type") != "codex-remote-pairing-v1":
+        return pairing_code
+    normalized_relay_url = relay_url.rstrip("/")
+    if payload.get("relayUrl") == normalized_relay_url:
+        return pairing_code
+    payload["relayUrl"] = normalized_relay_url
+    return prefix + b64url_encode(canonical_json(payload))
+
+
+def parse_pairing_code_payload(pairing_code: str) -> dict[str, Any] | None:
+    prefix = "crp1."
+    if not pairing_code.startswith(prefix):
+        return None
+    try:
+        payload = json.loads(b64url_decode(pairing_code[len(prefix) :]))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("type") != "codex-remote-pairing-v1":
+        return None
+    return payload
+
+
+def pairing_code_is_expired(pairing_code: str, *, now: float | None = None) -> bool:
+    payload = parse_pairing_code_payload(pairing_code)
+    if payload is None:
+        return False
+    expires_at = payload.get("expiresAt")
+    if not isinstance(expires_at, int | float):
+        return False
+    current_time = time.time() if now is None else now
+    return float(expires_at) <= current_time
+
+
 @dataclass(slots=True)
 class BridgeConfig:
     relay_url: str
@@ -250,6 +293,18 @@ class CodexBridge:
             self._config.bridge_label = self._args.bridge_label
             self._config.pairing_code = None
             needs_save = True
+        if self._config.pairing_code is not None:
+            normalized_pairing_code = normalize_pairing_code_relay_url(
+                self._config.pairing_code,
+                self._config.relay_url,
+            )
+            if normalized_pairing_code != self._config.pairing_code:
+                self._config.pairing_code = normalized_pairing_code
+                needs_save = True
+            if self._config.pairing_code is not None and pairing_code_is_expired(self._config.pairing_code):
+                self._config.device_id = None
+                self._config.pairing_code = None
+                needs_save = True
         if needs_save:
             self._config.save(self._config_path)
 
@@ -293,7 +348,10 @@ class CodexBridge:
                     raise RuntimeError(f"Bridge enrollment failed: {response.status} {body}")
                 payload = json.loads(body)
         self._config.device_id = payload["deviceId"]
-        self._config.pairing_code = payload["pairingCode"]
+        self._config.pairing_code = normalize_pairing_code_relay_url(
+            payload["pairingCode"],
+            self._config.relay_url,
+        )
         self._config.save(self._config_path)
 
     async def _serve_forever(self) -> None:

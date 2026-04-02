@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-remote-cli"
+version = "0.1.0"
+description = "Bridge CLI for Codex Remote relay connections"
+readme = "README.md"
+requires-python = ">=3.12"
+keywords = ["codex", "remote", "relay", "bridge", "cli"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Utilities",
+]
+dependencies = [
+  "aiohttp>=3.9,<4",
+  "cryptography>=42,<46",
+  "qrcode>=8,<9",
+]
+license = {file = "LICENSE"}
+
+[project.scripts]
+codex-remote-cli = "codex_remote_cli.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Dospacite/codex_remote_cli"
+Repository = "https://github.com/Dospacite/codex_remote_cli"
+Issues = "https://github.com/Dospacite/codex_remote_cli/issues"
+
+[tool.setuptools]
+packages = ["codex_remote_cli"]

@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+coverage.xml
+dist/
+build/
+pip-wheel-metadata/
+.mypy_cache/
+.ruff_cache/
+.DS_Store

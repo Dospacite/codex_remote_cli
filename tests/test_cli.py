@@ -8,12 +8,14 @@ import stat
 import tempfile
 import unittest
 from argparse import Namespace
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
 from codex_remote_cli.__main__ import (
     BridgeConfig,
     CodexBridge,
+    RelaySessionClosed,
     _validate_relay_url,
     build_parser,
     canonical_json,
@@ -21,6 +23,7 @@ from codex_remote_cli.__main__ import (
     pairing_code_is_expired,
     resolve_app_server_command,
     render_pairing_qr,
+    main,
 )
 
 
@@ -228,6 +231,37 @@ class ParserTests(unittest.TestCase):
             args = parser.parse_args(["serve"])
         self.assertEqual(args.app_server_bin, "/tmp/app-server")
 
+    def test_main_performs_sync_process_cleanup_on_keyboard_interrupt(self) -> None:
+        fake_bridge = mock.Mock()
+        fake_bridge.run = mock.AsyncMock()
+        fake_bridge._shutdown_local_process_sync = mock.Mock()
+
+        with mock.patch("codex_remote_cli.__main__.build_parser") as build_parser_mock, mock.patch(
+            "codex_remote_cli.__main__.CodexBridge",
+            return_value=fake_bridge,
+        ), mock.patch(
+            "codex_remote_cli.__main__.asyncio.run",
+            side_effect=KeyboardInterrupt,
+        ):
+            parser = mock.Mock()
+            parser.parse_args.return_value = Namespace(
+                command="serve",
+                config="~/.config/codex_remote_cli/config.json",
+                relay_url="https://relay.example.com",
+                bridge_label="workstation",
+                enroll_token=None,
+                local_port=47123,
+                ready_timeout=30,
+                app_server_bin="codex app-server",
+                app_server_cwd=None,
+            )
+            build_parser_mock.return_value = parser
+
+            with self.assertRaises(KeyboardInterrupt):
+                main()
+
+        fake_bridge._shutdown_local_process_sync.assert_called_once_with()
+
 
 class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_ensure_enrolled_requests_fresh_pairing_code_when_cached_code_is_expired(self) -> None:
@@ -417,3 +451,46 @@ class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(task, timeout=1)
 
             self.assertTrue(session_cancelled.is_set())
+
+    async def test_serve_forever_does_not_reraise_handled_session_failure_from_finally(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "config.json"
+            config = BridgeConfig.create(
+                relay_url="https://relay.example.com",
+                bridge_label="workstation",
+            )
+            config.device_id = "device-1"
+            config.save(path)
+
+            bridge = CodexBridge(
+                Namespace(
+                    config=str(path),
+                    relay_url="https://relay.example.com",
+                    bridge_label="workstation",
+                    enroll_token=None,
+                    local_port=47123,
+                    ready_timeout=30,
+                    app_server_bin="codex app-server",
+                    app_server_cwd=None,
+                    command="serve",
+                )
+            )
+
+            async def fail_once_then_stop() -> None:
+                bridge._stopping.set()
+                raise RelaySessionClosed("The remote client closed the relay session.")
+
+            with mock.patch.object(bridge, "_run_single_session", side_effect=fail_once_then_stop), mock.patch.object(
+                bridge,
+                "_shutdown_local_process",
+                new=mock.AsyncMock(),
+            ) as shutdown_mock, mock.patch("asyncio.get_running_loop") as get_loop, mock.patch(
+                "sys.stderr",
+                new_callable=StringIO,
+            ) as stderr:
+                get_loop.return_value = mock.Mock(add_signal_handler=mock.Mock())
+
+                await asyncio.wait_for(bridge._serve_forever(), timeout=1)
+
+            shutdown_mock.assert_awaited_once()
+            self.assertIn("Bridge session failed: The remote client closed the relay session.", stderr.getvalue())

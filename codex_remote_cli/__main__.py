@@ -455,6 +455,9 @@ class CodexBridge:
                         await task
                     except asyncio.CancelledError:
                         pass
+                    except Exception:
+                        # The session error is handled by the main loop above.
+                        pass
         await self._shutdown_local_process()
 
     async def _run_single_session(self) -> None:
@@ -1020,6 +1023,39 @@ class CodexBridge:
                 self._process.kill()
                 await self._process.wait()
         self._process = None
+        self._cleanup_local_token_file()
+
+    def _shutdown_local_process_sync(self) -> None:
+        process = self._process
+        if process is not None and process.returncode is None:
+            try:
+                os.kill(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            else:
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    try:
+                        waited_pid, _ = os.waitpid(process.pid, os.WNOHANG)
+                    except ChildProcessError:
+                        break
+                    if waited_pid == process.pid:
+                        break
+                    time.sleep(0.1)
+                else:
+                    try:
+                        os.kill(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    else:
+                        try:
+                            os.waitpid(process.pid, 0)
+                        except ChildProcessError:
+                            pass
+        self._process = None
+        self._cleanup_local_token_file()
+
+    def _cleanup_local_token_file(self) -> None:
         if self._local_token_file is not None:
             try:
                 os.unlink(self._local_token_file.name)
@@ -1072,7 +1108,10 @@ def main() -> None:
         bridge = CodexBridge(args)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    asyncio.run(bridge.run())
+    try:
+        asyncio.run(bridge.run())
+    finally:
+        bridge._shutdown_local_process_sync()
 
 
 if __name__ == "__main__":

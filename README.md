@@ -49,6 +49,7 @@ On first run the CLI:
 6. waits for the mobile app to connect
 
 Once the mobile app claims the pairing code, the bridge keeps reconnecting to the relay and relaunching `app-server` if needed.
+Existing cached pairing codes are reused on later CLI runs. Use `--refresh` only when you want to mint a new pairing code and invalidate the previous unclaimed QR/code.
 
 ## Commands
 
@@ -60,6 +61,12 @@ Runs the bridge normally. This is the default command if you omit the subcommand
 codex-remote-cli --relay-url https://relay.example.com serve
 ```
 
+Request a new pairing code explicitly:
+
+```bash
+codex-remote-cli --relay-url https://relay.example.com --refresh serve
+```
+
 ### `pairing-code`
 
 Prints the last pairing code and QR stored in the config file without starting the bridge.
@@ -69,6 +76,7 @@ codex-remote-cli --config ~/.config/codex_remote_cli/config.json pairing-code
 ```
 
 This only works if the config already contains a pairing code from a previous successful enrollment.
+Pass `--refresh` if you want the CLI to request and print a newly issued pairing code instead.
 
 ## Configuration
 
@@ -77,6 +85,7 @@ CLI flags:
 - `--config`: config file path, default `~/.config/codex_remote_cli/config.json`
 - `--relay-url`: relay base URL, default `https://cr.rousoftware.com`
 - `--bridge-label`: human-readable bridge name, default `My workstation`
+- `--refresh`: request a new pairing code, invalidating the previously issued unclaimed code
 - `--enroll-token`: optional bootstrap token required by the relay when enrollment protection is enabled
 - `--local-port`: local `app-server` port, default `47123`
 - `--ready-timeout`: seconds to wait for `app-server` readiness, default `30`

@@ -89,6 +89,7 @@ class BridgeConfigTests(unittest.TestCase):
                     config=str(path),
                     relay_url="https://new.example.com",
                     bridge_label="workstation",
+                    refresh=False,
                     enroll_token=None,
                     local_port=47123,
                     ready_timeout=30,
@@ -118,6 +119,7 @@ class BridgeConfigTests(unittest.TestCase):
                     config=str(path),
                     relay_url="https://relay.example.com",
                     bridge_label="new label",
+                    refresh=False,
                     enroll_token=None,
                     local_port=47123,
                     ready_timeout=30,
@@ -147,6 +149,7 @@ class BridgeConfigTests(unittest.TestCase):
                     config=str(path),
                     relay_url="https://new.example.com",
                     bridge_label="workstation",
+                    refresh=False,
                     enroll_token=None,
                     local_port=47123,
                     ready_timeout=30,
@@ -231,9 +234,14 @@ class ParserTests(unittest.TestCase):
             args = parser.parse_args(["serve"])
         self.assertEqual(args.app_server_bin, "/tmp/app-server")
 
+    def test_refresh_flag_is_parsed(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["--refresh", "pairing-code"])
+        self.assertTrue(args.refresh)
+
     def test_main_performs_sync_process_cleanup_on_keyboard_interrupt(self) -> None:
         fake_bridge = mock.Mock()
-        fake_bridge.run = mock.AsyncMock()
+        fake_bridge.run = mock.Mock(return_value=None)
         fake_bridge._shutdown_local_process_sync = mock.Mock()
 
         with mock.patch("codex_remote_cli.__main__.build_parser") as build_parser_mock, mock.patch(
@@ -249,6 +257,7 @@ class ParserTests(unittest.TestCase):
                 config="~/.config/codex_remote_cli/config.json",
                 relay_url="https://relay.example.com",
                 bridge_label="workstation",
+                refresh=False,
                 enroll_token=None,
                 local_port=47123,
                 ready_timeout=30,
@@ -284,6 +293,7 @@ class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         config=str(path),
                         relay_url="https://cr.rousoftware.com",
                         bridge_label="workstation",
+                        refresh=False,
                         enroll_token=None,
                         local_port=47123,
                         ready_timeout=30,
@@ -337,6 +347,7 @@ class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     config=str(path),
                     relay_url="https://cr.rousoftware.com",
                     bridge_label="workstation",
+                    refresh=False,
                     enroll_token=None,
                     local_port=47123,
                     ready_timeout=30,
@@ -368,6 +379,98 @@ class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bridge._config.device_id, "device-1")
             self.assertEqual(bridge._config.pairing_code, fresh_pairing_code)
 
+    async def test_run_reuses_cached_pairing_code_without_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "config.json"
+            config = BridgeConfig.create(
+                relay_url="https://cr.rousoftware.com",
+                bridge_label="workstation",
+            )
+            config.device_id = "device-1"
+            config.pairing_code = BridgeConfigTests._pairing_code(
+                relay_url="https://cr.rousoftware.com",
+            )
+            config.save(path)
+
+            bridge = CodexBridge(
+                Namespace(
+                    config=str(path),
+                    relay_url="https://cr.rousoftware.com",
+                    bridge_label="workstation",
+                    refresh=False,
+                    enroll_token=None,
+                    local_port=47123,
+                    ready_timeout=30,
+                    app_server_bin="codex app-server",
+                    app_server_cwd=None,
+                    command="serve",
+                )
+            )
+
+            with mock.patch.object(bridge, "_ensure_enrolled", new=mock.AsyncMock(return_value=False)), mock.patch.object(
+                bridge,
+                "_refresh_pairing_code",
+                new=mock.AsyncMock(),
+            ) as refresh_mock, mock.patch.object(
+                bridge,
+                "_print_pairing_materials",
+            ) as print_mock, mock.patch.object(
+                bridge,
+                "_serve_forever",
+                new=mock.AsyncMock(),
+            ) as serve_mock:
+                await bridge.run()
+
+            refresh_mock.assert_not_awaited()
+            print_mock.assert_called_once_with()
+            serve_mock.assert_awaited_once_with()
+
+    async def test_run_refreshes_pairing_code_only_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "config.json"
+            config = BridgeConfig.create(
+                relay_url="https://cr.rousoftware.com",
+                bridge_label="workstation",
+            )
+            config.device_id = "device-1"
+            config.pairing_code = BridgeConfigTests._pairing_code(
+                relay_url="https://cr.rousoftware.com",
+            )
+            config.save(path)
+
+            bridge = CodexBridge(
+                Namespace(
+                    config=str(path),
+                    relay_url="https://cr.rousoftware.com",
+                    bridge_label="workstation",
+                    refresh=True,
+                    enroll_token=None,
+                    local_port=47123,
+                    ready_timeout=30,
+                    app_server_bin="codex app-server",
+                    app_server_cwd=None,
+                    command="serve",
+                )
+            )
+
+            with mock.patch.object(bridge, "_ensure_enrolled", new=mock.AsyncMock(return_value=False)), mock.patch.object(
+                bridge,
+                "_refresh_pairing_code",
+                new=mock.AsyncMock(),
+            ) as refresh_mock, mock.patch.object(
+                bridge,
+                "_print_pairing_materials",
+            ) as print_mock, mock.patch.object(
+                bridge,
+                "_serve_forever",
+                new=mock.AsyncMock(),
+            ) as serve_mock:
+                await bridge.run()
+
+            refresh_mock.assert_awaited_once_with()
+            print_mock.assert_called_once_with()
+            serve_mock.assert_awaited_once_with()
+
     async def test_ensure_enrolled_normalizes_pairing_code_relay_url(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             path = Path(tempdir) / "config.json"
@@ -377,6 +480,7 @@ class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     config=str(path),
                     relay_url="https://cr.rousoftware.com",
                     bridge_label="workstation",
+                    refresh=False,
                     enroll_token=None,
                     local_port=47123,
                     ready_timeout=30,
@@ -421,6 +525,7 @@ class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     config=str(path),
                     relay_url="https://relay.example.com",
                     bridge_label="workstation",
+                    refresh=False,
                     enroll_token=None,
                     local_port=47123,
                     ready_timeout=30,
@@ -467,6 +572,7 @@ class BridgeLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     config=str(path),
                     relay_url="https://relay.example.com",
                     bridge_label="workstation",
+                    refresh=False,
                     enroll_token=None,
                     local_port=47123,
                     ready_timeout=30,

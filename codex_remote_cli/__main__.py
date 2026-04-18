@@ -330,7 +330,7 @@ class CodexBridge:
 
     async def run(self) -> None:
         enrolled_now = await self._ensure_enrolled()
-        if not enrolled_now:
+        if self._args.refresh and not enrolled_now:
             await self._refresh_pairing_code()
         if self._args.command == "pairing-code":
             if not self._config.pairing_code:
@@ -1070,6 +1070,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="~/.config/codex_remote_cli/config.json")
     parser.add_argument("--relay-url", default=os.getenv("CODEX_REMOTE_RELAY_URL", "https://cr.rousoftware.com"))
     parser.add_argument("--bridge-label", default=os.getenv("CODEX_REMOTE_BRIDGE_LABEL", "My workstation"))
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Request a new pairing code and invalidate any previously issued unclaimed code.",
+    )
     parser.add_argument("--enroll-token", default=os.getenv("CODEX_REMOTE_ENROLL_TOKEN"))
     parser.add_argument("--local-port", type=int, default=int(os.getenv("CODEX_REMOTE_LOCAL_PORT", "47123")))
     parser.add_argument("--ready-timeout", type=int, default=int(os.getenv("CODEX_REMOTE_READY_TIMEOUT", "30")))
